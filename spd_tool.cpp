@@ -426,13 +426,32 @@ static void *op_thread(void *arg) {
         log_line("[+] Done.");
         break;
 
-    // ── op 6: erase partition ─────────────────────────────────────────────────
-    case 6:
-        snprintf(cmd, sizeof(cmd), "%s erase_part %s", prefix, a->param);
-        { char msg[1024]; snprintf(msg,sizeof(msg),"[*] Erasing partition: %s\n",a->param); log_append(msg); }
+    // ── op 6: erase partition(s) ──────────────────────────────────────────────
+    case 6: {
+        // a->param is comma-separated list of partition names
+        char parts[32][64]; int n = 0;
+        const char *p = a->param;
+        while (*p && n < 32) {
+            while (*p == ' ' || *p == ',') p++;
+            if (!*p) break;
+            const char *e = p; while (*e && *e != ',') e++;
+            int len = (int)(e - p);
+            if (len > 0 && len < 64) { strncpy(parts[n], p, len); parts[n][len] = '\0'; n++; }
+            p = e;
+        }
+        // build single spd_dump invocation with all erase_part subcommands chained
+        snprintf(cmd, sizeof(cmd), "%s ", prefix);
+        for (int i = 0; i < n; i++) {
+            char chunk[128];
+            snprintf(chunk, sizeof(chunk), "erase_part %s ", parts[i]);
+            strncat(cmd, chunk, sizeof(cmd) - strlen(cmd) - 1);
+        }
+        char msg[256]; snprintf(msg, sizeof(msg), "[*] Erasing %d partition(s)...\n", n);
+        log_append(msg);
         run_command(cmd);
         log_line("[+] Done.");
         break;
+    }
 
     // ── op 7: erase all ───────────────────────────────────────────────────────
     case 7:
@@ -480,7 +499,7 @@ static void *op_thread(void *arg) {
 
     // ── append reset if requested (skipped for standalone reset op) ───────────
     if (a->reset_after && a->op != 10) {
-        char reset_cmd[1048];
+        char reset_cmd[1030];
         snprintf(reset_cmd, sizeof(reset_cmd), "%s reset", prefix);
         log_line("[*] Sending reset...");
         run_command(reset_cmd);
@@ -582,12 +601,68 @@ static void flash_all_cb(Fl_Widget *, void *) {
 }
 
 static void erase_part_cb(Fl_Widget *, void *) {
-    const char *part = fl_input("Partition name to erase:", "");
-    if (!part || !part[0]) return;
-    char confirm[256];
-    snprintf(confirm, sizeof(confirm), "Erase partition '%s'?", part);
-    if (fl_choice("%s", "Cancel", "Erase", nullptr, confirm) != 1) return;
-    spawn_op(6, part);
+    static char erase_parts[32][64];
+    int erase_count = 0;
+
+    while (1) {
+        const char *part = fl_input(
+            "Partition to erase (%d queued so far):",
+            "",
+            erase_count
+        );
+
+        if (!part || !part[0]) break;
+
+        if (erase_count >= 32) {
+            fl_alert("Maximum 32 partitions reached.");
+            break;
+        }
+
+        while (*part == ' ') part++;
+        if (!*part) break;
+
+        strncpy(erase_parts[erase_count], part, 63);
+        erase_parts[erase_count][63] = '\0';
+
+        char added[128];
+        snprintf(added, sizeof(added),
+                 "[+] queued erase: %s\n",
+                 erase_parts[erase_count]);
+        log_append(added);
+
+        erase_count++;
+
+        if (fl_choice("Add another partition?",
+                      "No (Erase now)", "Yes", nullptr) != 1)
+            break;
+    }
+
+    if (erase_count == 0) return;
+
+    char list[512] = "";
+    for (int i = 0; i < erase_count; i++) {
+        strncat(list, "  ", sizeof(list) - strlen(list) - 1);
+        strncat(list, erase_parts[i], sizeof(list) - strlen(list) - 1);
+        strncat(list, "\n", sizeof(list) - strlen(list) - 1);
+    }
+
+    char confirm[640];
+    snprintf(confirm, sizeof(confirm),
+             "Erase %d partition(s)?\n\n%s",
+             erase_count, list);
+
+    if (fl_choice("%s", "Cancel", "Erase", nullptr, confirm) != 1)
+        return;
+
+    char param[512] = "";
+    for (int i = 0; i < erase_count; i++) {
+        if (i > 0)
+            strncat(param, ",", sizeof(param) - strlen(param) - 1);
+        strncat(param, erase_parts[i],
+                sizeof(param) - strlen(param) - 1);
+    }
+
+    spawn_op(6, param);
 }
 
 static void erase_all_cb(Fl_Widget *, void *) {
